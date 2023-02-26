@@ -1,28 +1,106 @@
+image: docker:stable
+
+services:
+  - docker:19.03-dind
+
 variables:
   DOCKER_TLS_CERTDIR: ""
-  AWS_ECR_IMAGE_NAME: "nodejs-application"
-  
+  # <!-- it will be used to name ecr, images, cloud-formations or any -->
+  # <!-- other resource that will be created to handle your application -->
+  APPLICATION_NAME: "nodejs-application"
+
+
+# ***************************************** #
+# Define reusable funcstions and variables. #
+# ***************************************** #
+before_script:
+  # <!-- define necessary and reusable functions -->
+  - function REPOSITORY_MSG { echo "- missing \$$1 on gitlab repository environment variables"; }
+  - function WORKSPACE_MSG { echo "- missing \$$1 on gitlab workspace environment variables (contact the gitlab account owner)"; }
+  # <!-- creation version control variables -->
+  - HASH=${CI_COMMIT_SHA:0:8}
+  # <!-- the following line greps app version from node package.json -->
+  # <!-- but you can change for any other structure you want -->
+  - VERSION=$(cat ./app/package.json | grep -m 1 version | sed 's/[^0-9.]//g')   
+  - FILENAME="${APPLICATION_NAME}-${HASH}-version-${VERSION}-build-${CI_PIPELINE_ID}"
+  # <!-- export aws credentials to handle connection -->
+  - export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+  - export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+  - export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+
 stages:
-  - build
-  
+  - validate
+  - infra
+  - deploy
+
+
 # ***************************************** #
-# The following stages will build docker    #
-# image and push to aws ecr                 #
+# The following stage will check if all     #
+# required environment variables is defined #
 # ***************************************** #
-build:
-  stage: build
-  image: docker:stable
-  services:
-    - docker:19.03-dind
+validate:
+  stage: validate
+  environment:
+    name: $CI_COMMIT_BRANCH
+  script:
+    # <!-- validate required environment variables -->
+    - if [ -z $AWS_ACCESS_KEY_ID ]; then { set -- "$@" "$(WORKSPACE_MSG 'AWS_ACCESS_KEY_ID')"; } fi
+    - if [ -z $AWS_SECRET_ACCESS_KEY ]; then { set -- "$@" "$(WORKSPACE_MSG 'AWS_SECRET_ACCESS_KEY')"; } fi
+    - if [ -z $AWS_DEFAULT_REGION ]; then { set -- "$@" "$(WORKSPACE_MSG 'AWS_DEFAULT_REGION')"; } fi
+    - if [ -z $DOMAIN ]; then { set -- "$@" "$(WORKSPACE_MSG 'DOMAIN')"; } fi
+    - if [ -z $AWS_AUTOSCALING_MIN ]; then { set -- "$@" "$(REPOSITORY_MSG 'AWS_AUTOSCALING_MIN')"; } fi
+    - if [ -z $AWS_AUTOSCALING_MAX ]; then { set -- "$@" "$(REPOSITORY_MSG 'AWS_AUTOSCALING_MAX')"; } fi
+    - if [ -z $AWS_EC2_INSTANCE_TYPE ]; then { set -- "$@" "$(REPOSITORY_MSG 'AWS_EC2_INSTANCE_TYPE')"; } fi
+    - if [ -z $AWS_HOSTED_ZONE_ID ]; then { set -- "$@" "$(REPOSITORY_MSG 'AWS_HOSTED_ZONE_ID')"; } fi
+    - if [ ${#@} -gt 0 ]; then { echo "<!-- VALIDATION ERRORS --->"; printf "%s\n" "$@"; exit 1; } fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == "staging" || $CI_COMMIT_BRANCH == "production"
+
+# *************************************** #
+# The following stage will deploy aws     #
+# infrastructure resources throught sls   #
+# with cloud formation                    #
+# *************************************** #
+infra:
+  stage: infra
+  environment:
+    name: $CI_COMMIT_BRANCH
+  script:
+    # <!-- mount serverless environment variables -->
+    - echo "SERVERLESS_SERVICE_NAME=${APPLICATION_NAME}" >> .env    
+    - echo "AWS_AUTOSCALING_MIN=${AWS_AUTOSCALING_MIN}" >> .env    
+    - echo "AWS_AUTOSCALING_MAX=${AWS_AUTOSCALING_MAX}" >> .env    
+    - echo "AWS_EC2_INSTANCE_TYPE=${AWS_EC2_INSTANCE_TYPE}" >> .env    
+    - echo "AWS_ECR_REPOSITORY_NAME=${AWS_ECR_REPOSITORY_NAME}" >> .env    
+    - echo "AWS_HOSTED_ZONE_ID=${AWS_HOSTED_ZONE_ID}" >> .env    
+    - echo "DOMAIN=${DOMAIN}" >> .env    
+    - echo "APP_VERSION=Hash ${HASH} - Version ${VERSION} - Build ${CI_PIPELINE_IID}" >> .env
+    # <!-- build aws infrastructure with serverless -->
+    - npm -g install serverless serverless-dotenv-plugin
+    - serverless deploy --config serverless.yml --stage ${CI_COMMIT_BRANCH} --region ${AWS_DEFAULT_REGION} --verbose    
+  when: on_success
+  dependencies:
+    - validate
+  rules:
+    - if: $CI_COMMIT_BRANCH == "staging" || $CI_COMMIT_BRANCH == "production"
+
+# **************************************** #
+# The following stage will build docker    #
+# image and push to aws ecr                #
+# **************************************** #
+deploy:
+  stage: deploy
+  environment:
+    name: $CI_COMMIT_BRANCH
   before_script:
     # install aws from python
     - apk add --update --no-cache python3 py3-pip && pip3 install --upgrade pip && pip install --no-cache-dir --upgrade awscli
   script:
     # run deploy application script
-    - sh ./scripts/deploy.sh $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY $AWS_DEFAULT_REGION $AWS_ECR_IMAGE_NAME
+    - sh ./scripts/deploy.sh $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY $AWS_DEFAULT_REGION $APPLICATION_NAME
   after_script: 
     # terminate all aws ec2 instances
     # to be re-created with updated images
     - sh ./scripts/restart_ec2_instances.sh
-  only:
-    - main
+  rules:
+    - if: $CI_COMMIT_BRANCH == "staging" || $CI_COMMIT_BRANCH == "production"

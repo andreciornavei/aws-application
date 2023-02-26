@@ -20,15 +20,16 @@ sudo ./aws/install
 ## DEFINE ENVIRONMENT VARIABLES
 DOCKER_REPOSITORY_NAME=llmatos
 AWS_DEFAULT_REGION=sa-east-1
+AWS_ELASTIC_IP=54.233.122.237
 
 ## ADD ACCOUNT ID TO VARIABLE
 aws_account_id=$(aws sts get-caller-identity --query "Account" --output text)
 
 ## ATTACH ELASTIC IP TO INSTANCE FOR PREVENT IP CHANGES
-## 1 - GET THE CURRENT INSTANCE IF
+## 1 - GET THE CURRENT INSTANCE
 ec2_instance_id=$(ec2-metadata --instance-id | cut -d " " -f 2)
 ## 2 - ALLOCATE ELASTIC-IP TO EC2-INSTANCE
-aws ec2 associate-address --instance-id $ec2_instance_id --public-ip 54.233.122.237
+aws ec2 associate-address --instance-id $ec2_instance_id --public-ip $AWS_ELASTIC_IP
 
 
 ## *************************************************************************** ##

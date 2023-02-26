@@ -1,0 +1,229 @@
+service: ${env:SERVERLESS_SERVICE_NAME}
+
+useDotenv: true
+
+plugins:
+  - serverless-dotenv-plugin
+
+provider:
+  name: aws
+  stage: ${opt:stage}
+  environment:
+    AWS_AUTOSCALING_MIN: ${env:AWS_AUTOSCALING_MIN} # default 1 if SingleInstance
+    AWS_AUTOSCALING_MAX: ${env:AWS_AUTOSCALING_MAX} # default 1 if SingleInstance
+    AWS_EC2_INSTANCE_TYPE: ${env:AWS_EC2_INSTANCE_TYPE} # t2.micro, t2.medium, t3.medium, etc...
+    AWS_HOSTED_ZONE_ID: ${env:AWS_HOSTED_ZONE_ID}
+    AWS_ECR_REPOSITORY_NAME: ${env:AWS_ECR_REPOSITORY_NAME}
+    DOMAIN: ${env:DOMAIN}
+    APP_VERSION: ${env:APP_VERSION}   
+
+resources:
+  Resources:
+    VPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: 10.1.0.0/16
+        Tags:
+          - Key: Name
+            Value:  !Sub ${AWS::StackName}-vpc
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+      DependsOn: VPC
+      Properties: 
+        Tags: 
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-internet-gateway
+    # attach internet gateway to vpc
+    AttachGateway:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref VPC
+        InternetGatewayId: !Ref InternetGateway
+    # public subnet to expose ingress
+    PublicSubnetA:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: 
+          Ref: VPC
+        CidrBlock: 10.1.10.0/24
+        MapPublicIpOnLaunch: true
+        AvailabilityZone: !Select 
+          - 0
+          - Fn::GetAZs: !Ref 'AWS::Region'
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-public-a
+    PublicSubnetB:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.1.20.0/24
+        MapPublicIpOnLaunch: true
+        AvailabilityZone: !Select 
+          - 1
+          - Fn::GetAZs: !Ref 'AWS::Region'
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-public-b
+    # private subnet to expose ingress
+    PrivateSubnetA:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.1.50.0/24
+        MapPublicIpOnLaunch: false
+        AvailabilityZone: !Select 
+          - 0
+          - Fn::GetAZs: !Ref 'AWS::Region'
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-private-a
+    PrivateSubnetB:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.1.60.0/24
+        MapPublicIpOnLaunch: false
+        AvailabilityZone: !Select 
+          - 1
+          - Fn::GetAZs: !Ref 'AWS::Region'
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-private-b
+    # create a public router table to be
+    # able to create the pubic route
+    PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref VPC
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-public-router
+    # create a public route attached to internet
+    # gateway to allow the NAT Gateway creation
+    PublicRoute1:
+      Type: AWS::EC2::Route
+      DependsOn: AttachGateway
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+    # create an elastic ip addres turn
+    # possible the NAT Gateway creation
+    ElasticIPAddress:
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: VPC
+    # create NATGateway for private connections
+    # and egress internet communication
+    NATGateway:
+      Type: AWS::EC2::NatGateway
+      Properties:
+        AllocationId: !GetAtt ElasticIPAddress.AllocationId
+        SubnetId: !Ref PublicSubnetA
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-nat
+    # create the private router table
+    # to hold private route
+    PrivateRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref VPC
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-private-router
+    # create private route that can access
+    # the web through NAT Gateway
+    PrivateRoute1:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref NATGateway
+    # attach public and private subnets to routers
+    PublicSubnetARouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnetA
+        RouteTableId: !Ref PublicRouteTable
+    PublicSubnetBRouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnetB
+        RouteTableId: !Ref PublicRouteTable
+    PrivateSubnetARouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PrivateSubnetA
+        RouteTableId: !Ref PrivateRouteTable
+    PrivateSubnetBRouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PrivateSubnetB
+        RouteTableId: !Ref PrivateRouteTable
+    # register domain on hosted zone id for
+    # certificate validations and www access
+    PrimaryRoute53Record:
+      Type: AWS::Route53::RecordSet
+      Properties:
+        Type: CNAME
+        Name: ${self:provider.environment.DOMAIN}
+        HostedZoneId: ${self:provider.environment.AWS_HOSTED_ZONE_ID}
+        TTL: 300
+        ResourceRecords:
+          - !GetAtt BeanstalkEnv.EndpointURL   
+    # create certificates for app domains on environment
+    CertificateDomainPrimary:
+      Type: AWS::CertificateManager::Certificate
+      Properties:
+        ValidationMethod: DNS
+        DomainName: ${self:provider.environment:DOMAIN}
+        SubjectAlternativeNames:
+          - "*.${self:provider.environment:DOMAIN}"
+          - "www.${self:provider.environment:DOMAIN}"
+        DomainValidationOptions:
+          - DomainName: ${self:provider.environment:DOMAIN}
+            ValidationDomain: ${self:provider.environment:DOMAIN}
+        Tags:
+          - Key: Name
+            Value: !Sub ${AWS::StackName}-cert-primary-domain
+  # Export all necessary resources to be consumed 
+  # by others cloud formation stacks.
+  Outputs:
+    VpcId:
+      Description: identifier for application vpc
+      Value:
+        Ref: VPC
+      Export:
+        Name: VpcId
+    PublicSubnetA:
+      Description: Identifier for application public subnet a
+      Value:
+        Ref: PublicSubnetA
+      Export:
+        Name: PublicSubnetA
+    PublicSubnetB:
+      Description: Identifier for application public subnet b
+      Value:
+        Ref: PublicSubnetB
+      Export:
+        Name: PublicSubnetB
+    PrivateSubnetA:
+      Description: Identifier for application private subnet a
+      Value:
+        Ref: PrivateSubnetA
+      Export:
+        Name: PrivateSubnetA
+    PrivateSubnetB:
+      Description: Identifier for application private subnet b
+      Value:
+        Ref: PrivateSubnetB
+      Export:
+        Name: PrivateSubnetB
+    CertPrimaryDomainArn:
+      Description: Arn identifier for cert primary domain
+      Value:
+        Ref: CertificateDomainPrimary
+      Export:
+        Name: CertPrimaryDomainArn
