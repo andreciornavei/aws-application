@@ -1,0 +1,15 @@
+{
+  "name": "node-application",
+  "version": "1.0.0",
+  "description": "A basic node application",
+  "main": "src/index.ts",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "develop": "tsx src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.14.1",
+    "tsx": "^3.12.3"
+  }
+}
